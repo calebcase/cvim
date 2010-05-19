@@ -1,0 +1,13 @@
+{
+	"name": "CVim",
+	"version": "0.1",
+	"description": "Chrome Vim Bindings",
+	"background_page": "bg/bg.html",
+	"permissions": ["tabs"],
+	"content_scripts": [{
+		"matches":	["http://*/*", "https://*/*"],
+		"css":		["fg/fg.css"],
+		"js":		["vim/vim.js", "fg/fg.js"],
+		"run_at":	"document_end"
+	}]
+}
