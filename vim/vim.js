@@ -38,37 +38,7 @@ function CVim() {
 		},
 	}
 
-	function KeyStack() {
-		this.stack = new Array();
-	}
-
-	KeyStack.prototype = {
-		length: function() {
-			return this.stack.length;
-		},
-
-		peek: function() {
-			debug.info("Peek Key: ", this.stack[0]);
-			return this.stack[0];
-		},
-
-		push: function(keyString) {
-			debug.info("Push Key Event: " + keyString);
-
-			this.stack.unshift(keyString);
-			debug.info("New Stack: ", this.stack);
-
-			mode.map(this);
-		},
-
-		reset: function() {
-			debug.info("Reset");
-
-			this.stack = new Array();
-		},
-	}
-
-	function KeyProcessor() {
+	function EventProcessor() {
 
 		/* charCodes are used for keyPress events. */
 		this.charCode2String = {
@@ -156,8 +126,62 @@ function CVim() {
 		var keyDownEvent = undefined;
 		var keyPressEvent = undefined;
 
+		/* All events are saved off until it is clear that they
+		 * will be mapped or not. When an a stack of events
+		 * isn't mapped, then the saved events are replayed (and
+		 * marked with ignore). As key up events are generated,
+		 * the stack is popped to the last key down event
+		 * (removing any keypress events that may have been
+		 * triggered in between). In this way, the exact
+		 * sequence of events should get reported when a series
+		 * of events is not mapped, but only some of the key up
+		 * events occur (i.e., if you hold down they shift key
+		 * and press several letters the capital letters that
+		 * are mapped will perform their action, unmapped ones
+		 * will pass through to the document, and the initial
+		 * shift will only be replayed once).
+		 */
+		var savedEvents = [];
+
+		function last(type) {
+			var last = savedEvents.length - 1;
+			for (; last >= 0 && savedEvents[last].type != type; last--);
+			debug.info("Last " + type + ": " + last, savedEvents[last], savedEvents);
+			return last;
+		}
+
+		function replay() {
+			for (var i = 0; i < savedEvents.length; i++) {
+				var event = savedEvents[i];
+
+				if (!event.ignore) {
+					event.ignore = true;
+
+					debug.info("Replaying: ", event);
+
+					event.returnValue = true;
+					event.target.dispatchEvent(event);
+				}
+			}
+		}
+
+		function trim(end) {
+			if (end >= 0) {
+				savedEvents = savedEvents.slice(0, end);
+			}
+			else {
+				savedEvents = [];
+			}
+			debug.info("After trim: ", savedEvents);
+		}
+
 		function keydown(event) {
+			if (event.ignore) return;
+
 			debug.info("key down event: ", event);
+
+			savedEvents.push(event);
+			//event.returnValue = false; /* prevent event propagation */
 
 			/* Convert repeated keys into keyup events (but ignore if
 			 * a keypress event has already occurred).
@@ -176,15 +200,21 @@ function CVim() {
 			 * 'ctrl + shift', and lastly 'ctrl + shift + a'.
 			 */
 			keyDownEvent = event;
-		};
+		}
 		document.addEventListener("keydown", keydown, true);
+		self.keydown = keydown;
 
 		function keypress(event) {
+			if (event.ignore) return;
+
 			debug.info("key press event: ", event);
+
+			savedEvents.push(event);
+			event.returnValue = false; /* prevent event propagation */
 
 			/* Convert repeated keys into keyup events. */
 			if (keyPressEvent && keyPressEvent.keyIdentifier == event.keyIdentifier) {
-				self.keyup(event);
+				self.keyup(event, true);
 			}
 
 			/* A printable key was pressed. */
@@ -205,10 +235,20 @@ function CVim() {
 			 * generates a charCode for Esc rather than [.
 			 */
 			if (keyPressEvent.charCode < 32) keyPressEvent.keyControlled = true;
-		};
+		}
 		document.addEventListener("keypress", keypress, true);
+		self.keypress = keypress;
 
-		function keyup(event) {
+		function keyup(event, converted) {
+			if (event.ignore) return;
+
+			debug.info("key up event: ", event);
+
+			if (!converted) {
+				savedEvents.push(event);
+				event.returnValue = false; /* prevent event propagation */
+			}
+
 			/* The final, for real, key event that we care about. */
 			var keyEvent = undefined;
 
@@ -226,6 +266,16 @@ function CVim() {
 					   keyDownEvent.keyIdentifier);
 			}
 
+			/* We have a keyup event for an already
+			 * processed event. Like key down, key up events
+			 * are generated for all key events, so for
+			 * 'ctrl + shift + a' three key up events are
+			 * generated: 'ctrl + shift + a', 'ctrl +
+			 * shift', and 'ctrl'. We are only interested in
+			 * the first one so after we process it, the key
+			 * events are unset and we ignore the others.
+			 */
+
 			/* Process keypress events over others. */
 			if (keyPressEvent) {
 				keyEvent = keyPressEvent;
@@ -239,33 +289,23 @@ function CVim() {
 
 			debug.info("key event: ", keyEvent);
 
-			/* We have a keyup event for an already
-			 * processed event. Like key down, key up events
-			 * are generated for all key events, so for
-			 * 'ctrl + shift + a' three key up events are
-			 * generated: 'ctrl + shift + a', 'ctrl +
-			 * shift', and 'ctrl'. We are only interested in
-			 * the first one so after we process it, the key
-			 * events are unset and we ignore the others.
-			 */
-
 			/* Create key string */
-			var keyString = "<";
+			var eventString = "<";
 
-			/* Process the meta keyString. If the key was
+			/* Process the meta eventString. If the key was
 			 * already shifted as in the case of a key press
 			 * event, then ignore the shift modifier.
 			 */
-			if (keyEvent.shiftKey && !keyEvent.keyShifted) keyString += "S-";
-			if (keyEvent.altKey) keyString += "A-";
-			if (keyEvent.ctrlKey && !keyEvent.keyControlled) keyString += "C-";
+			if (keyEvent.shiftKey && !keyEvent.keyShifted) eventString += "S-";
+			if (keyEvent.altKey) eventString += "A-";
+			if (keyEvent.ctrlKey && !keyEvent.keyControlled) eventString += "C-";
 
 			/* Its not clear that this is ever set
 			 * correctly. On my system pressing the meta key
 			 * results in a keyCode == 0 event with
 			 * metaKey == false.
 			 */
-			if (keyEvent.metaKey) keyString += "M-";
+			if (keyEvent.metaKey) eventString += "M-";
 
 			/* Decide what the character string should be.
 			 * If one isn't found, then ignore this key.
@@ -293,115 +333,204 @@ function CVim() {
 
 			/* Fair warning: charString could contain
 			 * unprintable characters. For example, CTRL-\
-			 * will produce a keyString that looks like "",
+			 * will produce a eventString that looks like "",
 			 * but really is ['"', 28, '"'].
 			 */
+			var mapped = false;
 			if (charString.length != 0) {
-				keyString += charString;
+				eventString += charString;
+				eventString += ">";
 
-				keyString += ">";
+				keyEvent.eventString = eventString;
 
-				/* Add key to stack. */
-				keyStack.push(keyString);
+				debug.info("Mapping event: " + eventString, keyEvent);
+				mapped = mode.map(keyEvent);
 			}
 			else debug.warn("Unable to convert key event to a string: ", keyEvent);
 
-			/* Reset the events, key was processed. */
+			if (!mapped) {
+				replay();
+			}
+
+			/* Remove handled events. */
+			trim(last("keydown"));
+
+			/* Find the last press and down events. */
 			keyPressEvent = undefined;
 			keyDownEvent = undefined;
-		};
+
+			for (var i = savedEvents.length - 1; i >= 0; i--) {
+				if (keyPressEvent && keyDownEvent) break;
+				switch (savedEvents[i].type) {
+					case "keypress":
+						keyPressEvent = savedEvents[i];
+						break;
+					case "keydown":
+						keyDownEvent = savedEvents[i];
+						break;
+					default:
+						debug.warn("Woah, this isn't supposed to be here: ", savedEvents[i]);
+				}
+			}
+
+			debug.info("After replay: ", savedEvents, keyPressEvent, keyDownEvent);
+		}
 		document.addEventListener("keyup", keyup, true);
 		self.keyup = keyup;
-	}
 
-	KeyProcessor.prototype = { };
+		/* Mouse event handlers */
 
-	function Mapper() {
-		this.mappings = new Array();
-		this.active = new Array();
-	}
+		/* If you thought the madness would stop with key events
+		 * you're disappointment is likely only be surpassed by
+		 * my despair. While it may seem to make sense to equate
+		 * keydown, keypress, and keyup with mousedown, click,
+		 * mouseup it simply isn't to be. Some events are
+		 * wrapped (as in 'down', 'event', 'up') while others
+		 * are ordered (as in 'down', 'up', 'event'). As a
+		 * special kind of madness, right click triggers the
+		 * contextmenu event (which proves to be the case that
+		 * breaks the rule with event ordering).
+		 *
+		 * 'click':		mousedown -> mouseup -> click
+		 * 'double click':	mousedown -> mouseup -> click -> mousedown -> mouseup -> click(2)
+		 * 'right click:	mousedown -> contextmenu
+		 */
 
-	Mapper.prototype = {
-		action: function() {
-			keyStack.reset();
-			mode.reset();
-		},
+		function mousedown(event) {
+			if (event.ignore) return;
 
-		reset: function() {
-			debug.info("Resetting");
-			this.active = this.mappings.concat([]);
+			debug.info("mousedown event: ", event);
 
-			var max = this.active.length;
-			for (var i = 0; i < max; i++) {
-				this.active[i].reset();
-			}
+			savedEvents.push(event);
+			//event.returnValue = false; /* prevent event propagation */
+		}
+		document.addEventListener("mousedown", mousedown, true);
 
-			debug.info("Mappings[" + this.mappings.length + "]", this.mappings);
-			debug.info("Active[" + this.active.length + "]", this.active);
-		},
+		function contextmenu(event) { /* aka, right click... */
+			if (event.ignore) return;
 
-		map: function(keyStack) {
-			debug.info("Mapping stack");
+			debug.info("contextmenu event: ", event);
 
-			var action = undefined;
+			savedEvents.push(event);
+			event.returnValue = false; /* prevent event propagation */
 
-			/* New set of active mappings. */
-			var newactive = new Array();
+			var eventString = "<";
 
-			/* Peek last key. */
-			var last = keyStack.peek();
-			debug.info("Last key was: " + last);
-
-			/* For each mapping. */
-			var max = this.active.length;
-			debug.info("Total active mappings: " + max);
-
-			for (var i = 0; i < max; i++) {
-				var mapping = this.active[i];
-
-				/* Update state with key. */
-				var state = mapping.next(last);
-				debug.info("State for mapping [" + i + "] is " + state, mapping);
-
-				/* If state is now Accept, then */
-				if (state == mapping.states.ACCEPT) {
-					debug.info("Accepting, running: ", mapping.action);
-
-					/* Save action to run and stop looping. */
-					action = mapping.action;
+			switch (event.detail) {
+				case 2:
+					eventString += "2-";
 					break;
-				}
-				/* Else if state is now Reject, then */
-				else if (state != mapping.states.REJECT) {
-					/* Add to active mappings. */
-					newactive.push(mapping);
-				}
+				case 3:
+					eventString += "3-";
+					break;
+				case 4:
+					eventString += "4-";
+					break;
 			}
 
-			/* If the keyStack isn't empty and
-			 * there aren't any other active mappers,
-			 * then set action to default.
-			 */
-			if (!action &&
-			    keyStack.length() != 0 &&
-			    newactive.length == 0) {
-				debug.info("Setting default action...");
+			eventString += "RightMouse>";
 
-				action = this.action;
+			var mapped = false;
+			event.eventString = eventString;
+			mapped = mode.map(event);
+
+			if (!mapped) {
+				replay();
 			}
 
-			/* If an action was found, then run it and reset. */
-			if (action) {
-				debug.info("Action found: ", action);
+			trim(last("mousedown"));
+		}
+		document.addEventListener("contextmenu", contextmenu, true);
 
-				action();
+		function mouseup(event) {
+			if (event.ignore) return;
+
+			debug.info("mouseup event: ", event);
+
+			savedEvents.push(event);
+			event.returnValue = false; /* prevent event propagation */
+
+			switch (event.button) {
+				case 0:
+					event.eventString = "<LeftRelease>";
+					break;
+				case 1:
+					event.eventString = "<MiddleRelease>";
+					break;
+				case 2:
+					event.eventString = "<RightRelease>";
+					break;
+				default:
+					debug.warn("Unknown button type: " + event.button);
 			}
-			/* Otherwise replace the active with our new one. */
-			else {
-				this.active = newactive;
+
+			var mapped = false;
+			if (event.eventString) {
+				mapped = mode.map(event);
 			}
-		},
-	};
+
+			if (!mapped) {
+				replay();
+			}
+
+			trim(last("mousedown"));
+		}
+		document.addEventListener("mouseup", mouseup, true);
+
+		function click(event) {
+			if (event.ignore) return;
+
+			debug.info("click event: ", event);
+
+			savedEvents.push(event);
+			event.returnValue = false; /* prevent event propagation */
+
+			var eventString = "<";
+
+			switch (event.detail) {
+				case 2:
+					eventString += "2-";
+					break;
+				case 3:
+					eventString += "3-";
+					break;
+				case 4:
+					eventString += "4-";
+					break;
+			}
+
+			switch (event.button) {
+				case 0:
+					eventString += "LeftMouse";
+					break;
+				case 1:
+					eventString += "MiddleMouse";
+					break;
+				case 2:
+					eventString += "RightMouse";
+					break;
+				default:
+					debug.warn("Unknown button type: " + event.button);
+					eventString = undefined;
+			}
+
+			var mapped = false;
+			if (eventString) {
+				eventString += ">";
+				event.eventString = eventString;
+				mapped = mode.map(event);
+			}
+
+			if (!mapped) {
+				replay();
+			}
+
+			trim(last("click"));
+		}
+		document.addEventListener("click", click, true);
+	}
+
+	EventProcessor.prototype = {};
 
 	function Mapping() {
 		this.states = {
@@ -413,8 +542,7 @@ function CVim() {
 		this.state = this.states.START;
 
 		this.action = function() {
-			keyStack.reset();
-			this.reset();
+			mode.reset();
 		};
 	}
 
@@ -423,9 +551,118 @@ function CVim() {
 			this.state = this.states.START;
 		},
 
-		next: function(keyString) {
+		next: function(eventString) {
 			this.state = this.states.REJECT;
 			return this.state;
+		},
+	};
+
+	function SingleKeyMapping(eventString, action) {
+		Mapping.apply(this, arguments);
+
+		this.eventString = eventString;
+		this.action = function() {
+			mode.reset();
+			action();
+		}
+	}
+
+	SingleKeyMapping.prototype = new Mapping();
+	SingleKeyMapping.prototype.next = function(keyEvent) {
+		if (keyEvent.eventString == this.eventString) {
+			this.state = this.states.ACCEPT;
+		}
+		else {
+			this.state = this.states.REJECT;
+		}
+		return this.state;
+	};
+
+	function Mapper() {
+		this.mappings = new Array();
+		this.active = new Array();
+	}
+
+	Mapper.prototype = {
+		init: function () { this.reset() },
+		fini: function () {},
+
+		action: function() {
+			this.reset();
+		},
+
+		reset: function() {
+			debug.info("Resetting");
+			this.active = this.mappings.concat([]);
+
+			for (var i = 0; i < this.active.length; i++) {
+				this.active[i].reset();
+			}
+
+			debug.info("Mappings[" + this.mappings.length + "]", this.mappings);
+			debug.info("Active[" + this.active.length + "]", this.active);
+		},
+
+		map: function(keyEvent) {
+			/* True if a mapping processed the event. */
+			var processed = false;
+
+			/* The mapping that accepted. */
+			var accepted = undefined;
+
+			/* New set of active mappings. */
+			var newactive = new Array();
+
+			/* For each mapping. */
+			debug.info("Total active mappings: " + this.active.length);
+
+			for (var i = 0; i < this.active.length; i++) {
+				var mapping = this.active[i];
+
+				/* Update state with key. */
+				var state = mapping.next(keyEvent);
+				debug.info("State for mapping [" + i + "] is " + state, mapping);
+
+				/* If state is now Accept, then */
+				if (state == mapping.states.ACCEPT) {
+					debug.info("Accepting, running: ", mapping.action);
+
+					/* Save mapping to run and stop looping. */
+					processed = true;
+					accepted = mapping;
+					break;
+				}
+				/* If state is something other than Reject, then */
+				else if (state != mapping.states.REJECT) {
+					/* Add to active mappings. */
+					processed = true;
+					newactive.push(mapping);
+				}
+			}
+
+			/* If no mapping accepted and there aren't any more
+			 * mappings to check (newactive is empty), then set
+			 * accepted to ourselves (so that the default action
+			 * will get called.
+			 */
+			if (!accepted && newactive.length == 0) {
+				debug.info("Setting default action...");
+
+				accepted = this;
+			}
+
+			/* Run the action if someone accepted. */
+			if (accepted) {
+				debug.info("Action found: ", accepted.action);
+
+				accepted.action();
+			}
+			/* Otherwise replace the active mappings with our new one. */
+			else {
+				this.active = newactive;
+			}
+
+			return processed;
 		},
 	};
 
@@ -435,7 +672,6 @@ function CVim() {
 		/* N is an environment variable for Normal Mode that
 		 * keeps track of an optional count modifier. It
 		 * defaults to 1 and gets updated by the count mapping.
-		 * Normal mappings should reset N to "1".
 		 */
 		var N = new String("1");
 
@@ -445,12 +681,10 @@ function CVim() {
 		};
 
 		/* The single key mapping that resets N. */
-		function NormalSingleKeyMapping(keyString, action, repeated) {
+		function NormalSingleKeyMapping(eventString, action, repeated) {
 			SingleKeyMapping.apply(this, arguments);
 
 			this.action = function() {
-				keyStack.reset();
-
 				if (repeated) {
 					var count = parseInt(N);
 					debug.info("count: " + count);
@@ -473,35 +707,35 @@ function CVim() {
 		 */
 		var count = new Mapping();
 		count.states.n = "collecting numbers";
-		count.isNum = function(keyString) {
-			if (keyString.length == 3) {
-				var charCode = keyString.charCodeAt(1);
+		count.isNum = function(eventString) {
+			if (eventString.length == 3) {
+				var charCode = eventString.charCodeAt(1);
 				if (charCode > 47 && charCode < 58) {
 					return true;
 				}
 			}
 			return false;
 		};
-		count.next = function(keyString) {
+		count.next = function(keyEvent) {
 			switch (this.state) {
 				case count.states.START:
-					debug.info("Count.states.START: " + keyString);
+					debug.info("Count.states.START: " + keyEvent);
 					this.state = this.states.REJECT;
-					if (this.isNum(keyString)) {
-						if (keyString[1] != "0") {
-							N = new String(keyString[1]);
+					if (this.isNum(keyEvent.eventString)) {
+						if (keyEvent.eventString[1] != "0") {
+							N = new String(keyEvent.eventString[1]);
 							this.state = this.states.n;
 						}
 					}
 					break;
 				case count.states.n:
-					if (this.isNum(keyString)) {
-						N += keyString[1];
+					if (this.isNum(keyEvent.eventString)) {
+						N += keyEvent.eventString[1];
 						debug.info("N: " + N);
 					}
 					else {
 						this.state = this.states.ACCEPT;
-						this.keyString = keyString;
+						this.keyEvent = keyEvent;
 					}
 					break;
 				default:
@@ -513,29 +747,31 @@ function CVim() {
 			debug.info("N: " + N);
 			debug.info(count);
 
-			/* Save off the keyString, its about to get
+			/* Save off the eventString, its about to get
 			 * erased with the reset.
 			 */
-			var keyString = count.keyString;
+			var keyEvent = count.keyEvent;
 
-			/* Reset the mode, this will allow the remainder
-			 * of the command to get processed.
+			/* Reset the mode so that the unprocessed key
+			 * event can get handled. This is only a partial
+			 * reset so that N is preserved.
 			 */
 			mode.reset(true);
-
-			/* Clear the stack and push the unprocessed key.
-			 * This will cause the key processing to
-			 * restart.
-			 */
-			keyStack.reset();
-			keyStack.push(keyString);
+			mode.map(keyEvent);
 		};
 		count.reset = function() {
 			count.state = count.states.START;
-			count.keyString = undefined;
+			count.keyEvent = undefined;
 		};
 
 		this.mappings.push(count);
+
+		this.mappings.push(
+			new NormalSingleKeyMapping("<Esc>",
+				function() {},
+				true
+			)
+		);
 
 		this.mappings.push(
 			new NormalSingleKeyMapping("<h>",
@@ -575,10 +811,10 @@ function CVim() {
 
 		var gg = new Mapping();
 		gg.states.g = "first g";
-		gg.next = function(keyString) {
+		gg.next = function(keyEvent) {
 			switch (this.state) {
 				case this.states.START:
-					switch (keyString) {
+					switch (keyEvent.eventString) {
 						/* g */
 						case "<g>":
 							this.state = this.states.g;
@@ -588,8 +824,8 @@ function CVim() {
 					};
 					break;
 				case this.states.g:
-					switch (keyString) {
-						/* Borrowed with love from the Vim help manual. */
+					switch (keyEvent.eventString) {
+						/* Borrowed with love from the Vim help manual.
 						/* g CTRL-A	   only when compiled with MEM_PROFILE
 						/* 		   defined: dump a memory profile
 						/* g CTRL-G	   show information about current cursor
@@ -650,7 +886,6 @@ function CVim() {
 						case "<g>":
 							this.state = this.states.ACCEPT;
 							this.action = function() {
-								keyStack.reset();
 								mode.reset();
 								window.scrollTo(0,0);
 							};
@@ -699,6 +934,26 @@ function CVim() {
 			)
 		);
 
+		this.mappings.push(
+			new NormalSingleKeyMapping("<i>",
+				function() {
+					mode.fini();
+					mode = modes.insert;
+					mode.init();
+				}
+			)
+		);
+
+		this.mappings.push(
+			new NormalSingleKeyMapping("<f>",
+				function() {
+					mode.fini();
+					mode = modes.hints;
+					mode.init();
+				}
+			)
+		);
+
 		this.reset();
 	}
 
@@ -712,43 +967,188 @@ function CVim() {
 		}
 	};
 
-	function SingleKeyMapping(keyString, action) {
-		Mapping.apply(this, arguments);
+	function InsertMapper() {
+		Mapper.apply(this, arguments);
 
-		this.keyString = keyString;
-		this.action = function() {
-			keyStack.reset();
-			mode.reset();
-			action();
-		}
+		this.mappings.push(
+			new SingleKeyMapping("<Esc>",
+				function() {
+					mode.fini();
+					mode = modes.normal;
+					mode.init();
+				}
+			)
+		);
+
+		this.reset();
 	}
 
-	SingleKeyMapping.prototype = new Mapping();
-	SingleKeyMapping.prototype.next = function(keyString) {
-		if (keyString == this.keyString) {
-			this.state = this.states.ACCEPT;
+	InsertMapper.prototype = new Mapper();
+
+	function HintsMapper() {
+		Mapper.apply(this, arguments);
+
+		var digits = 0;
+
+		this.digits = function(n) {
+			if (n) digits = n;
+			return digits;
+		};
+
+		/* Symbols from home row. */
+		var symbols = "asdfjklASDFJKL";
+
+		this.symbols = function(s) {
+			if (s) symbols = s;
+			return symbols;
+		};
+
+		this.mappings.push(
+			new SingleKeyMapping("<Esc>",
+				function() {
+					mode.fini();
+					mode = modes.normal;
+					mode.init();
+				}
+			)
+		);
+
+		var hint = new Mapping();
+		hint.states.n = "waiting for more digits";
+		hint.next = function(event) {
+			switch (this.state) {
+				case this.states.START:
+				case this.states.n:
+					if (event.eventString.length == 3 &&
+					    symbols.indexOf(event.eventString[1]) >= 0) {
+						this.digits.push(event.eventString[1]);
+						this.state = this.states.n;
+
+						if (this.digits.length == digits) {
+							this.state = this.states.ACCEPT;
+						}
+					}
+					else this.state = this.states.REJECT;
+					break;
+				default:
+					this.state = this.states.REJECT;
+			}
+			return this.state;
+		};
+		hint.action = function() {
+			debug.info("Follow the white rabbit.");
+			var hintClass = "CVimHint_" + this.digits.join("");
+
+			var results = document.evaluate(
+				"//div[contains(@class, '" + hintClass + "')]",
+				document.body,
+				document.createNSResolver(document),
+				XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+				null);
+			var node = results.snapshotItem(0);
+			debug.info("href: " + node.parentNode.getAttribute("href"));
+			window.location.href = node.parentNode.getAttribute("href");
 		}
-		else {
-			this.state = this.states.REJECT;
+		hint.reset = function() {
+			this.state = this.states.START;
+			this.digits = [];
+		};
+
+		this.mappings.push(hint);
+
+		this.reset();
+	}
+
+	HintsMapper.prototype = new Mapper();
+	HintsMapper.prototype.init = function() {
+		/* Select followable items. */
+		var results = document.evaluate(
+			"//a",
+			document.body,
+			document.createNSResolver(document),
+			XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+			null);
+		debug.info("Followables found: " + results.snapshotLength);
+
+		/* Symbols from home row. */
+		var symbols = this.symbols();
+
+		/* Calculate digits required. */
+		var digits = Math.ceil(Math.log(results.snapshotLength) / Math.log(symbols.length));
+		debug.info("Digits required: " + digits);
+		this.digits(digits);
+
+		function convert(n) {
+			var c = new Array(digits);
+			for (var i = 0; i < digits; i++) { c[i] = "a"; }
+
+			var i = digits - 1;
+			while (n != 0) {
+				var r = n % symbols.length;
+				c[i] = symbols[r];
+				n = Math.floor(n / symbols.length);
+				i--;
+			}
+			return c.join("");
 		}
-		return this.state;
+
+		var hints = [];
+		for (var i = 0; i < results.snapshotLength; i++) {
+			var hintString = convert(i);
+
+			var node = results.snapshotItem(i);
+			//node.className += " CVimHint_" + hintString;
+
+			var hint = document.createElement("div");
+			hint.className = "CVimHint CVimHint_" + hintString;
+
+			for (var j = 0; j < hintString.length; j++) {
+				var hintChar = document.createElement("span");
+				hintChar.className = "CVimHintChar";
+				hintChar.innerHTML = hintString[j];
+				hint.appendChild(hintChar);
+			}
+
+			var position = node.getClientRects()[0];
+			debug.info("Pos: ", position);
+			if (position) {
+				hint.style.position = "absolute";
+				hint.style.left = position.left + window.scrollX;
+				hint.style.top = position.top + window.scrollY;
+				hints.push([node, hint]);
+			}
+		}
+
+		for (var i = 0; i < hints.length; i++) {
+			hints[i][0].appendChild(hints[i][1]);
+		}
+	};
+	HintsMapper.prototype.fini = function() {
+		var results = document.evaluate(
+			"//div[contains(@class, 'CVimHint')]",
+			document.body,
+			document.createNSResolver(document),
+			XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+			null);
+		debug.info("Cleaning up: " + results.snapshotLength);
+		for (var i = 0; i < results.snapshotLength; i++) {
+			var node = results.snapshotItem(i);
+			node.parentNode.removeChild(node);
+		}
 	};
 
+	/* Environment */
+
 	var debug = new Debug(Debug.prototype.ALL);
-	this.debug = debug;
-
-	var keyStack = new KeyStack();
-	this.keyStack = keyStack;
-
-	var keyProcessor = new KeyProcessor(keyStack);
-	this.keyProcessor = keyProcessor;
 
 	var modes = {
 		normal: new NormalMapper(),
+		insert: new InsertMapper(),
+		hints: new HintsMapper(),
 	};
-	this.modes = modes;
 
-	var mode = this.modes.normal;
-	this.mode = mode;
+	var mode = modes.normal;
+
+	var eventProcessor = new EventProcessor();
 };
 

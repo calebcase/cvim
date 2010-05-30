@@ -10,8 +10,7 @@
 	min-height:		1.2em;
 
 	/* color */
-	background-color:	white;
-	opacity:		0.8;
+	background-color:	rgba(255, 255, 255, 0.8);
 
 	/* border */
 	border-style:		solid;
@@ -23,3 +22,18 @@
 	color:			black;
 }
 
+.CVimHint {
+	/* position */
+	position:		absolute;
+	z-index:		100;
+
+	/* color */
+	background-color:	rgba(255, 255, 0, 1.0);
+}
+
+.CVimHintChar {
+	/* text */
+	text-align:		center;
+	color:			black;
+	font-weight:		bold;
+}
